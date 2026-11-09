@@ -14,6 +14,14 @@ from .scanner import build_jobs
 from .transcriber import Cancelled, Transcriber, ensure_model
 
 
+STATUS_WAITING = "In attesa"
+STATUS_RUNNING = "In corso…"
+STATUS_DONE = "Completato"
+STATUS_PRESENT = "Già presente"
+STATUS_FOREIGN = "Esistente (non sovrascritto)"
+STATUS_ERROR = "Errore"
+
+
 @dataclass
 class Options:
     input_dir: Path
@@ -31,6 +39,8 @@ class Worker(QThread):
     file_progress = Signal(float)             # 0..1
     overall_progress = Signal(float)          # 0..1
     eta = Signal(str)
+    jobs_listed = Signal(list)                # [(sorgente, output, stato), ...]
+    job_status = Signal(int, str)             # indice nella lista, stato
     done = Signal(int, int, int, bool)        # fatti, saltati, errori, annullato
 
     def __init__(self, opts: Options):
@@ -66,18 +76,24 @@ class Worker(QThread):
                 return
 
             # Controllo di ripresa: separa i file già completati da quelli da fare
-            todo = []
-            for job in jobs:
+            todo = []          # (indice globale, job)
+            listing = []
+            for idx, job in enumerate(jobs):
                 state = output_state(job.source, job.output)
                 if state is OutputState.COMPLETE:
                     skipped += 1
+                    status = STATUS_PRESENT
                 elif state is OutputState.FOREIGN:
                     skipped += 1
+                    status = STATUS_FOREIGN
                     self.log.emit(f"⚠ '{job.output.name}' esiste già e non è stato creato da Transcriptor: non lo sovrascrivo.")
                 else:
                     if state is OutputState.STALE:
                         self.log.emit(f"Il file sorgente '{job.source.name}' è cambiato: verrà ritrascritto.")
-                    todo.append(job)
+                    status = STATUS_WAITING
+                    todo.append((idx, job))
+                listing.append((str(job.source), str(job.output), status))
+            self.jobs_listed.emit(listing)
 
             self.log.emit(f"Trovati {len(jobs)} file audio: {skipped} già completati, {len(todo)} da trascrivere.")
             if not todo:
@@ -85,7 +101,7 @@ class Worker(QThread):
                 self.done.emit(0, skipped, 0, False)
                 return
 
-            durations = [self._audio_seconds(j.source) for j in todo]
+            durations = [self._audio_seconds(j.source) for _, j in todo]
             total_audio = sum(durations) or float(len(todo))
 
             model_name = o.model_key
@@ -96,10 +112,11 @@ class Worker(QThread):
             processed_audio = 0.0
             t0 = time.monotonic()
 
-            for i, (job, dur) in enumerate(zip(todo, durations), start=1):
+            for i, ((gidx, job), dur) in enumerate(zip(todo, durations), start=1):
                 if self._cancel:
                     break
                 self.file_started.emit(i, len(todo), job.source.name)
+                self.job_status.emit(gidx, STATUS_RUNNING)
                 self.log.emit(f"[{i}/{len(todo)}] {job.source.name}")
                 weight = dur or 1.0
 
@@ -117,12 +134,15 @@ class Worker(QThread):
                     write_transcript(job.source, job.output, res.segments, res.language,
                                      res.duration, model_name, o.timestamps)
                     done += 1
+                    self.job_status.emit(gidx, STATUS_DONE)
                     self.log.emit(f"   ✓ salvato: {job.output}")
                 except Cancelled:
+                    self.job_status.emit(gidx, STATUS_WAITING)
                     self.log.emit("   Interrotto: questo file verrà ripreso al prossimo avvio.")
                     break
                 except Exception as e:
                     errors += 1
+                    self.job_status.emit(gidx, STATUS_ERROR)
                     self.log.emit(f"   ✗ errore: {e}")
                 processed_audio += weight
 

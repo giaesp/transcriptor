@@ -1,17 +1,48 @@
 """Finestra principale."""
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QSettings, Qt, QUrl
+from PySide6.QtGui import QBrush, QColor, QDesktopServices
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
-    QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
+    QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QFormLayout, QGroupBox,
+    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
+    QPlainTextEdit, QProgressBar, QPushButton, QSplitter, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget,
 )
 
 from . import APP_NAME, APP_VERSION
-from .worker import Options, Worker
+from .worker import (
+    STATUS_DONE, STATUS_ERROR, STATUS_FOREIGN, STATUS_PRESENT, STATUS_RUNNING,
+    Options, Worker,
+)
+
+STATUS_COLORS = {
+    STATUS_DONE: "#2e7d32", STATUS_PRESENT: "#2e7d32", STATUS_RUNNING: "#1565c0",
+    STATUS_ERROR: "#c62828", STATUS_FOREIGN: "#ef6c00",
+}
+ROLE_SRC = Qt.ItemDataRole.UserRole
+ROLE_OUT = Qt.ItemDataRole.UserRole + 1
+
+
+def open_path(path: Path):
+    QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+
+def reveal_in_folder(path: Path):
+    """Apre la cartella selezionando il file (Esplora risorse / Finder)."""
+    try:
+        if sys.platform == "win32":
+            subprocess.Popen(["explorer", "/select,", str(path)])
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", str(path)])
+        else:
+            open_path(path.parent)
+    except OSError:
+        open_path(path.parent)
 
 LANGUAGES = [
     ("Italiano", "it"), ("Rilevamento automatico", None), ("Inglese", "en"),
@@ -67,6 +98,46 @@ class MainWindow(QMainWindow):
         self.log_view = QPlainTextEdit(readOnly=True)
         self.log_view.setMaximumBlockCount(5000)
 
+        # --- Lista file
+        self.files = QTreeWidget()
+        self.files.setHeaderLabels(["Stato", "File audio", "Documento"])
+        self.files.setRootIsDecorated(False)
+        self.files.setAlternatingRowColors(True)
+        self.files.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.files.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        hdr = self.files.header()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.files.itemDoubleClicked.connect(lambda item, _c: self._open_doc(item))
+        self.files.customContextMenuRequested.connect(self._files_menu)
+        self.files.currentItemChanged.connect(lambda *_: self._update_file_buttons())
+
+        self.open_btn = QPushButton("Apri documento")
+        self.reveal_btn = QPushButton("Mostra nella cartella")
+        self.open_out_btn = QPushButton("Apri cartella documenti")
+        self.open_btn.clicked.connect(lambda: self._open_doc(self.files.currentItem()))
+        self.reveal_btn.clicked.connect(lambda: self._reveal(self.files.currentItem()))
+        self.open_out_btn.clicked.connect(self._open_output_dir)
+        fbtns = QHBoxLayout()
+        fbtns.addWidget(self.open_btn)
+        fbtns.addWidget(self.reveal_btn)
+        fbtns.addStretch(1)
+        fbtns.addWidget(self.open_out_btn)
+
+        files_box = QWidget()
+        fv = QVBoxLayout(files_box)
+        fv.setContentsMargins(0, 0, 0, 0)
+        fv.addWidget(QLabel("File (doppio clic per aprire il documento):"))
+        fv.addWidget(self.files, 1)
+        fv.addLayout(fbtns)
+
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.addWidget(files_box)
+        splitter.addWidget(self.log_view)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 1)
+
         self.start_btn = QPushButton("Avvia trascrizione")
         self.start_btn.setMinimumHeight(36)
         self.stop_btn = QPushButton("Interrompi")
@@ -87,10 +158,83 @@ class MainWindow(QMainWindow):
         v.addWidget(QLabel("Totale:"))
         v.addWidget(self.total_bar)
         v.addWidget(self.eta_label)
-        v.addWidget(self.log_view, 1)
+        v.addWidget(splitter, 1)
         self.setCentralWidget(root)
+        self.resize(900, 760)
 
         self._load_settings()
+        self._update_file_buttons()
+
+    # ---------- lista file
+    def _populate(self, listing: list):
+        self.files.clear()
+        for src, out, status in listing:
+            item = QTreeWidgetItem([status, Path(src).name, Path(out).name])
+            item.setData(0, ROLE_SRC, src)
+            item.setData(0, ROLE_OUT, out)
+            item.setToolTip(1, src)
+            item.setToolTip(2, out)
+            self._paint(item, status)
+            self.files.addTopLevelItem(item)
+        self._update_file_buttons()
+
+    def _paint(self, item: QTreeWidgetItem, status: str):
+        item.setText(0, status)
+        color = STATUS_COLORS.get(status)
+        item.setForeground(0, QBrush(QColor(color)) if color else QBrush())
+
+    def _set_status(self, idx: int, status: str):
+        item = self.files.topLevelItem(idx)
+        if item:
+            self._paint(item, status)
+            if status == STATUS_RUNNING:
+                self.files.scrollToItem(item)
+            if item is self.files.currentItem():
+                self._update_file_buttons()
+
+    def _doc_of(self, item) -> Path | None:
+        if item is None:
+            return None
+        p = Path(item.data(0, ROLE_OUT))
+        return p if p.exists() else None
+
+    def _update_file_buttons(self):
+        has_doc = self._doc_of(self.files.currentItem()) is not None
+        self.open_btn.setEnabled(has_doc)
+        self.reveal_btn.setEnabled(has_doc)
+
+    def _open_doc(self, item):
+        doc = self._doc_of(item)
+        if doc:
+            open_path(doc)
+        elif item is not None:
+            QMessageBox.information(self, APP_NAME, "Il documento non è ancora stato creato.")
+
+    def _reveal(self, item):
+        doc = self._doc_of(item)
+        if doc:
+            reveal_in_folder(doc)
+
+    def _open_output_dir(self):
+        d = Path(self.out_edit.text().strip())
+        if self.out_edit.text().strip() and d.is_dir():
+            open_path(d)
+
+    def _files_menu(self, pos):
+        item = self.files.itemAt(pos)
+        if item is None:
+            return
+        doc = self._doc_of(item)
+        src = Path(item.data(0, ROLE_SRC))
+        menu = QMenu(self)
+        a = menu.addAction("Apri documento", lambda: open_path(doc))
+        a.setEnabled(doc is not None)
+        b = menu.addAction("Mostra documento nella cartella", lambda: reveal_in_folder(doc))
+        b.setEnabled(doc is not None)
+        menu.addSeparator()
+        menu.addAction("Apri file audio", lambda: open_path(src))
+        menu.addAction("Mostra file audio nella cartella", lambda: reveal_in_folder(src))
+        menu.exec(self.files.viewport().mapToGlobal(pos))
 
     # ---------- helpers
     def _folder_row(self, key: str):
@@ -160,6 +304,7 @@ class MainWindow(QMainWindow):
 
         self._save_settings()
         self.log_view.clear()
+        self.files.clear()
         self.file_bar.setValue(0)
         self.total_bar.setValue(0)
         self.eta_label.setText("")
@@ -179,6 +324,8 @@ class MainWindow(QMainWindow):
         w.file_progress.connect(lambda f: self.file_bar.setValue(int(f * 100)))
         w.overall_progress.connect(lambda f: self.total_bar.setValue(int(f * 100)))
         w.eta.connect(lambda t: self.eta_label.setText(f"Tempo stimato rimanente: {t}"))
+        w.jobs_listed.connect(self._populate)
+        w.job_status.connect(self._set_status)
         w.done.connect(self._finished)
         self.worker = w
         w.start()
