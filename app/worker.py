@@ -1,6 +1,7 @@
 """Thread di elaborazione: non blocca la UI."""
 from __future__ import annotations
 
+import sys
 import time
 import traceback
 from dataclasses import dataclass
@@ -60,6 +61,13 @@ class Worker(QThread):
             return 0.0
 
     def run(self):
+        _keep_awake(True)
+        try:
+            self._run()
+        finally:
+            _keep_awake(False)
+
+    def _run(self):
         o = self.opts
         done = skipped = errors = 0
         try:
@@ -150,6 +158,19 @@ class Worker(QThread):
         except Exception:
             self.log.emit("Errore imprevisto:\n" + traceback.format_exc())
             self.done.emit(done, skipped, errors + 1, self._cancel)
+
+
+def _keep_awake(on: bool):
+    """Su Windows impedisce la sospensione del PC durante il lavoro (lo schermo può spegnersi)."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
+        flags = ES_CONTINUOUS | (ES_SYSTEM_REQUIRED if on else 0)
+        ctypes.windll.kernel32.SetThreadExecutionState(flags)
+    except Exception:
+        pass
 
 
 def _fmt_eta(seconds: float) -> str:
