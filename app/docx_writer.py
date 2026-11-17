@@ -90,7 +90,7 @@ def _fmt_ts(seconds: float) -> str:
     return f"{s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}"
 
 
-def _paragraphs(segments: list[Segment], pause: float = 2.0, max_chars: int = 900) -> list[tuple[float, str]]:
+def _paragraphs(segments: list[Segment], pause: float = 1.5, max_chars: int = 900) -> list[tuple[float, str]]:
     """Raggruppa i segmenti in paragrafi: un nuovo paragrafo dopo una pausa o quando è troppo lungo."""
     paras: list[tuple[float, str]] = []
     cur: list[str] = []

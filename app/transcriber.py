@@ -42,6 +42,29 @@ def ensure_model(name: str, target: Path, log: Callable[[str], None]) -> Path:
     return target
 
 
+WORD_PAUSE = 1.0  # secondi: oltre questa pausa tra due parole il segmento viene diviso
+
+
+def _split_on_pauses(seg) -> list[Segment]:
+    """Usa i tempi delle parole: inizio/fine reali e divisione del segmento sulle pause interne."""
+    words = [w for w in (seg.words or []) if w.word.strip()]
+    if not words:
+        return [Segment(seg.start, seg.end, seg.text.strip())]
+    parts: list[Segment] = []
+    cur = [words[0]]
+    for prev, w in zip(words, words[1:]):
+        if w.start - prev.end > WORD_PAUSE:
+            parts.append(_join(cur))
+            cur = []
+        cur.append(w)
+    parts.append(_join(cur))
+    return parts
+
+
+def _join(words) -> Segment:
+    return Segment(words[0].start, words[-1].end, "".join(w.word for w in words).strip())
+
+
 class Transcriber:
     def __init__(self, model_path: Path, language: str | None):
         from faster_whisper import WhisperModel
@@ -67,13 +90,14 @@ class Transcriber:
             vad_parameters={"min_silence_duration_ms": 500},
             beam_size=5,
             condition_on_previous_text=False,  # riduce le ripetizioni "in loop"
+            word_timestamps=True,              # tempi precisi: servono per riconoscere le pause
         )
         out: list[Segment] = []
         duration = info.duration or 0.0
         for seg in segments:  # generatore: la trascrizione avviene qui
             if is_cancelled():
                 raise Cancelled()
-            out.append(Segment(seg.start, seg.end, seg.text.strip()))
+            out.extend(_split_on_pauses(seg))
             if duration:
                 on_progress(min(seg.end / duration, 1.0))
         on_progress(1.0)
