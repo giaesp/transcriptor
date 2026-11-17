@@ -5,6 +5,9 @@ on:
   push:
     tags: ["v*"]            # es. git tag v0.1.0 && git push --tags  -> crea una Release
 
+permissions:
+  contents: write           # necessario per pubblicare la Release
+
 jobs:
   build:
     runs-on: windows-latest
